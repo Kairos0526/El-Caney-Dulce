@@ -180,7 +180,7 @@ const CFG={
  pago:{banco:"",telefono:"0412-0985317",cedula:""},                      // Pago Móvil: completa banco y cédula cuando Ángel los pase
  opiniones:[]                                                            // ej.: {nombre:"Ana",texto:"Muy rica",estrellas:5}
 };
-/* ===== 2) GOOGLE SHEETS / APPS SCRIPT · YA CONECTADO ===== */
+/* ===== 2) GOOGLE SHEETS / APPS SCRIPT · EL CANEY DULCE ===== */
 const APPS_SCRIPT_URL="https://script.google.com/macros/s/AKfycbyPWniQh4KXwUJ-y5MoqOR-S47UFW3-buzpQh5MlgkvD0OqfVp4AFUkJPwt-4UcVDyT/exec";
 const SHEET_ID="1Y_YnBqPtBX_DctcSgCBdBNkgF2IkBz-J0rYtHJkhRg0";
 const SHEET_GID="0";
@@ -208,7 +208,7 @@ const RESPALDO=[
  ["Chocomaní","Chocolate y maní en una sola porción."],["Choco Arequipe","Granas de chocolate con arequipe."],
  ["Piña","Crema suave con trocitos de piña."]
 ].map(([nombre,descripcion])=>({id:mkId(nombre),nombre,descripcion,precio:2.5,stock:10}));
-let prods=RESPALDO,cart={};
+let prods=RESPALDO,cart={},firmaInventario='',consultando=false;
 
 /* ---- Catálogo: Apps Script + respaldo directo a Google Sheets ---- */
 function csv(t){const r=[];let f='',row=[],q=false;for(let i=0;i<t.length;i++){const c=t[i];if(q){if(c=='"'){if(t[i+1]=='"'){f+='"';i++}else q=false}else f+=c}else if(c=='"')q=true;else if(c==','){row.push(f);f=''}else if(c=='\n'||c=='\r'){if(c=='\r'&&t[i+1]=='\n')i++;row.push(f);f='';r.push(row);row=[]}else f+=c}if(f||row.length){row.push(f);r.push(row)}return r}
@@ -229,23 +229,46 @@ function toP(o){
     stock:st===undefined?10:Math.max(0,parseInt(st,10)||0)
   };
 }
-async function cargar(){
-  let p=null;
-  if(APPS_SCRIPT_URL){
-    try{
-      const j=await(await fetch(APPS_SCRIPT_URL)).json();
-      p=(Array.isArray(j)?j:j.productos||j.tortas||[]).map(toP);
-    }catch(e){console.warn('Apps Script no disponible, probando hoja directa',e)}
+async function cargar(esActualizacionFondo=false){
+  if(consultando)return;
+  consultando=true;
+  let ok=false,nuevos=null;
+
+  try{
+    if(APPS_SCRIPT_URL){
+      try{
+        const ctrl=new AbortController(),tm=setTimeout(()=>ctrl.abort(),4500);
+        const sep=APPS_SCRIPT_URL.includes('?')?'&':'?';
+        const j=await(await fetch(`${APPS_SCRIPT_URL}${sep}t=${Date.now()}`,{signal:ctrl.signal,cache:'no-store'})).json();
+        clearTimeout(tm);
+        const p=(Array.isArray(j)?j:j.productos||j.tortas||[]).map(toP).filter(Boolean);
+        if(p.length){nuevos=p;ok=true}
+      }catch(e){if(!esActualizacionFondo)console.warn('Apps Script no disponible, probando hoja directa',e)}
+    }
+
+    if(!ok&&SHEET_ID){
+      try{
+        const[h,...rows]=csv(await(await fetch(`https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&gid=${SHEET_GID}&t=${Date.now()}`,{cache:'no-store'})).text());
+        const p=rows.map(x=>toP(Object.fromEntries(h.map((c,i)=>[c,x[i]])))).filter(Boolean);
+        if(p.length){nuevos=p;ok=true}
+      }catch(e){if(!esActualizacionFondo)console.warn('Hoja no disponible: se usa el respaldo local',e)}
+    }
+
+    if(ok&&nuevos){
+      const nuevaFirma=JSON.stringify(nuevos.map(p=>[p.nombre,p.precio,p.stock]));
+      if(nuevaFirma!==firmaInventario){
+        firmaInventario=nuevaFirma;
+        prods=nuevos;
+        render();
+      }
+    }else if(!esActualizacionFondo){
+      prods=RESPALDO;
+      firmaInventario=JSON.stringify(prods.map(p=>[p.nombre,p.precio,p.stock]));
+      render();
+    }
+  }finally{
+    consultando=false;
   }
-  if((!p||!p.filter(Boolean).length)&&SHEET_ID){
-    try{
-      const[h,...rows]=csv(await(await fetch(`https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&gid=${SHEET_GID}`)).text());
-      p=rows.map(x=>toP(Object.fromEntries(h.map((c,i)=>[c,x[i]]))));
-    }catch(e){console.warn('Hoja no disponible: se usa el respaldo local',e)}
-  }
-  p=(p||[]).filter(Boolean);
-  prods=p.length?p:RESPALDO;
-  render();
 }
 
 function slice(n){const s=norm(n),h=k=>s.includes(k);let o='';
@@ -276,6 +299,7 @@ function enviar(){const n=$('#nom').value.trim(),dv=$('[name=ent]:checked').valu
  if(APPS_SCRIPT_URL){
    fetch(APPS_SCRIPT_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body:JSON.stringify({items:L.map(({p,n})=>({producto:p.nombre,cantidad:n}))})}).catch(()=>{});
    L.forEach(({p,n})=>{p.stock=Math.max(0,p.stock-n)});
+   firmaInventario=JSON.stringify(prods.map(p=>[p.nombre,p.precio,p.stock]));
    render();
  }
  if(!window.open(wa(msg),'_blank','noopener'))location.href=wa(msg)}
@@ -331,6 +355,7 @@ document.addEventListener('visibilitychange',go);
 let rt;addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(()=>{const c=innerWidth!==W;size();if(c)init();go()},200)});
 size();init();setRun(!RM.matches);
 render();cargar();
+setInterval(()=>{if(!document.hidden)cargar(true)},5000);
 </script>
 </body>
 </html>
